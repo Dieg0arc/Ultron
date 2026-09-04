@@ -33,7 +33,7 @@ MIN_PEAK = 0.15           # piso absoluto de amplitud para considerar un pico
 PEAK_RATIO = 4.0          # el pico debe superar el ruido ambiente por este factor
 COOLDOWN_SECONDS = 3.0    # ignora nuevos aplausos durante este tiempo tras disparar
 
-LOG_PREFIX = "[jarvis-clap]"
+LOG_PREFIX = "[ultron-clap]"
 
 
 def log(msg: str) -> None:

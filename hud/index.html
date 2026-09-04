@@ -1,0 +1,581 @@
+<!doctype html>
+<html lang="es" data-state="booting">
+<head>
+<meta charset="utf-8" />
+<title>Ultron</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Michroma&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+  :root {
+    --bg: oklch(13% 0.025 240);
+    --bg-soft: oklch(17% 0.03 240);
+    --line: oklch(32% 0.02 230);
+    --ink: oklch(93% 0.02 210);
+    --ink-dim: oklch(62% 0.03 220);
+
+    --listening: oklch(72% 0.13 220);
+    --listening-dim: oklch(46% 0.09 225);
+    --thinking: oklch(80% 0.16 75);
+    --thinking-dim: oklch(52% 0.11 70);
+    --speaking: oklch(88% 0.1 200);
+    --speaking-dim: oklch(60% 0.12 205);
+    --off: oklch(45% 0.01 240);
+
+    --accent: var(--listening);
+    --accent-dim: var(--listening-dim);
+    --ring-speed: 90s;
+    --ring-speed-mid: 46s;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+  }
+
+  body {
+    font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+    cursor: default;
+    user-select: none;
+  }
+
+  #frame {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+    border-radius: 28px;
+    overflow: hidden;
+    background:
+      radial-gradient(120% 90% at 50% 38%, oklch(19% 0.035 235) 0%, var(--bg) 62%, oklch(9% 0.02 240) 100%);
+    box-shadow:
+      inset 0 0 0 1px oklch(38% 0.03 230 / 0.5),
+      0 30px 80px -20px oklch(5% 0 0 / 0.6);
+  }
+
+  #frame::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      to bottom,
+      oklch(100% 0 0 / 0.012) 0px,
+      oklch(100% 0 0 / 0.012) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+    mix-blend-mode: overlay;
+  }
+
+  #vignette {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: radial-gradient(120% 110% at 50% 50%, transparent 55%, oklch(6% 0.01 240 / 0.85) 100%);
+  }
+
+  header {
+    position: absolute;
+    top: 22px;
+    left: 26px;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    z-index: 5;
+  }
+
+  #dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 8px 1px var(--accent);
+    transition: background .25s linear, box-shadow .25s linear;
+    animation: dot-pulse 2.6s ease-in-out infinite;
+  }
+
+  [data-state="thinking"] #dot { animation-duration: .9s; }
+  [data-state="speaking"] #dot { animation-duration: .5s; }
+  [data-state="disconnected"] #dot,
+  [data-state="booting"] #dot { animation-duration: 1.6s; }
+
+  @keyframes dot-pulse {
+    0%, 100% { opacity: .45; transform: scale(.85); }
+    50% { opacity: 1; transform: scale(1.15); }
+  }
+
+  h1 {
+    margin: 0;
+    font-family: 'Michroma', ui-sans-serif, system-ui, sans-serif;
+    font-size: 12.5px;
+    font-weight: 400;
+    letter-spacing: .32em;
+    color: var(--ink-dim);
+  }
+
+  #telemetry {
+    position: absolute;
+    top: 24px;
+    right: 26px;
+    text-align: right;
+    font-size: 9.5px;
+    line-height: 1.65;
+    letter-spacing: .06em;
+    color: var(--ink-dim);
+    z-index: 5;
+  }
+
+  #telemetry .k { color: var(--accent); transition: color .25s linear; }
+
+  #stage {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+  }
+
+  #core-wrap {
+    position: relative;
+    width: min(76vmin, 380px);
+    height: min(76vmin, 380px);
+  }
+
+  svg#rings { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+
+  .ring { fill: none; transition: stroke .3s linear; }
+  #ring-outer {
+    stroke: var(--accent-dim);
+    stroke-width: 1;
+    stroke-dasharray: 1 7;
+    animation: spin var(--ring-speed) linear infinite;
+    transform-origin: center;
+  }
+  #ring-mid {
+    stroke: var(--accent);
+    stroke-width: 1.25;
+    stroke-dasharray: 60 18 4 18;
+    opacity: .8;
+    animation: spin-rev var(--ring-speed-mid) linear infinite;
+    transform-origin: center;
+  }
+  #ring-inner {
+    stroke: var(--accent-dim);
+    stroke-width: .75;
+    opacity: .65;
+  }
+  #ring-ticks {
+    stroke: var(--accent-dim);
+    stroke-width: 1;
+    opacity: .5;
+  }
+
+  [data-state="listening"] { --accent: var(--listening); --accent-dim: var(--listening-dim); }
+  [data-state="thinking"] {
+    --accent: var(--thinking); --accent-dim: var(--thinking-dim);
+    --ring-speed: 7s; --ring-speed-mid: 3.4s;
+  }
+  [data-state="speaking"] {
+    --accent: var(--speaking); --accent-dim: var(--speaking-dim);
+    --ring-speed: 30s; --ring-speed-mid: 14s;
+  }
+  [data-state="booting"], [data-state="disconnected"], [data-state="paused"] {
+    --accent: var(--off); --accent-dim: var(--off);
+    --ring-speed: 140s; --ring-speed-mid: 70s;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes spin-rev { to { transform: rotate(-360deg); } }
+
+  canvas#fx {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    mix-blend-mode: screen;
+  }
+
+  #core {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 34%;
+    height: 34%;
+    border-radius: 50%;
+    transform: translate(-50%, -50%) scale(var(--core-scale, 1));
+    background: radial-gradient(circle at 50% 42%, oklch(98% 0.02 210 / .9), var(--accent) 45%, transparent 72%);
+    box-shadow: 0 0 calc(18px + 40px * var(--core-glow, .3)) calc(2px + 10px * var(--core-glow, .3)) var(--accent-dim);
+    opacity: var(--core-opacity, .85);
+    mix-blend-mode: screen;
+    transition: background .3s linear, box-shadow .06s linear;
+    animation: breathe 4.2s ease-in-out infinite;
+  }
+
+  [data-state="thinking"] #core { animation-duration: 1.1s; }
+  [data-state="speaking"] #core { animation: none; }
+  [data-state="booting"] #core,
+  [data-state="disconnected"] #core,
+  [data-state="paused"] #core { animation-duration: 3.4s; opacity: .35; }
+
+  @keyframes breathe {
+    0%, 100% { transform: translate(-50%, -50%) scale(calc(var(--core-scale, 1) * .94)); }
+    50% { transform: translate(-50%, -50%) scale(calc(var(--core-scale, 1) * 1.05)); }
+  }
+
+  footer {
+    position: absolute;
+    bottom: 26px;
+    left: 0;
+    right: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 7px;
+    z-index: 5;
+  }
+
+  #state-label {
+    font-family: 'Michroma', ui-sans-serif, system-ui, sans-serif;
+    font-size: 13px;
+    letter-spacing: .34em;
+    color: var(--accent);
+    transition: color .25s linear;
+  }
+
+  #state-sub {
+    font-size: 10px;
+    letter-spacing: .08em;
+    color: var(--ink-dim);
+    min-height: 1.4em;
+  }
+
+  #boot-log {
+    position: absolute;
+    bottom: 66px;
+    left: 0;
+    right: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    font-size: 9px;
+    letter-spacing: .05em;
+    color: var(--ink-dim);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .4s linear;
+  }
+  [data-state="booting"] #boot-log { opacity: .8; }
+  #boot-log span { opacity: 0; animation: boot-line .5s ease-out forwards; }
+  #boot-log span:nth-child(1) { animation-delay: .1s; }
+  #boot-log span:nth-child(2) { animation-delay: .5s; }
+  #boot-log span:nth-child(3) { animation-delay: .9s; }
+  @keyframes boot-line { to { opacity: 1; } }
+
+  #pause-btn {
+    position: absolute;
+    bottom: 24px;
+    left: 26px;
+    z-index: 6;
+    width: 30px;
+    height: 30px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    border: 1px solid var(--line);
+    background: oklch(20% 0.02 235 / 0.5);
+    color: var(--ink-dim);
+    cursor: pointer;
+    transition: color .2s linear, border-color .2s linear, background .2s linear;
+  }
+  #pause-btn:hover { color: var(--accent); border-color: var(--accent-dim); }
+  #pause-btn svg { width: 13px; height: 13px; fill: currentColor; }
+  #pause-btn #icon-play { display: none; }
+  [data-state="paused"] #pause-btn { color: var(--thinking); border-color: var(--thinking-dim); }
+  [data-state="paused"] #pause-btn #icon-pause { display: none; }
+  [data-state="paused"] #pause-btn #icon-play { display: block; }
+  [data-state="booting"] #pause-btn,
+  [data-state="disconnected"] #pause-btn {
+    opacity: .35;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+  <div id="frame">
+    <div id="stage">
+      <div id="core-wrap">
+        <svg id="rings" viewBox="0 0 400 400">
+          <circle id="ring-outer" class="ring" cx="200" cy="200" r="188" />
+          <circle id="ring-mid" class="ring" cx="200" cy="200" r="158" />
+          <circle id="ring-inner" class="ring" cx="200" cy="200" r="122" />
+          <g id="ring-ticks"></g>
+        </svg>
+        <canvas id="fx"></canvas>
+        <div id="core"></div>
+      </div>
+    </div>
+
+    <header>
+      <div id="dot"></div>
+      <h1>ULTRON</h1>
+    </header>
+
+    <div id="telemetry">
+      <div>NUCLEO&nbsp;<span class="k" id="tm-state">BOOT</span></div>
+      <div>ENLACE&nbsp;<span class="k" id="tm-link">--</span></div>
+      <div>NIVEL&nbsp;<span class="k" id="tm-level">00%</span></div>
+    </div>
+
+    <div id="vignette"></div>
+
+    <button id="pause-btn" type="button" title="Pausar Ultron" aria-label="Pausar Ultron">
+      <svg id="icon-pause" viewBox="0 0 24 24"><rect x="5" y="4" width="5" height="16"/><rect x="14" y="4" width="5" height="16"/></svg>
+      <svg id="icon-play" viewBox="0 0 24 24"><path d="M6 4l14 8-14 8z"/></svg>
+    </button>
+
+    <div id="boot-log">
+      <span>inicializando nucleo...</span>
+      <span>calibrando audio...</span>
+      <span>enlazando con ultron_voice...</span>
+    </div>
+
+    <footer>
+      <div id="state-label">INICIALIZANDO</div>
+      <div id="state-sub">esperando conexión</div>
+    </footer>
+  </div>
+
+<script>
+(() => {
+  const root = document.documentElement;
+  const core = document.getElementById('core');
+  const label = document.getElementById('state-label');
+  const sub = document.getElementById('state-sub');
+  const tmState = document.getElementById('tm-state');
+  const tmLink = document.getElementById('tm-link');
+  const tmLevel = document.getElementById('tm-level');
+  const canvas = document.getElementById('fx');
+  const ctx = canvas.getContext('2d');
+  const ticksGroup = document.getElementById('ring-ticks');
+
+  const LABELS = {
+    booting: ['INICIALIZANDO', 'preparando sistemas'],
+    listening: ['ESCUCHANDO', 'decime "estás ahí, ultron?"'],
+    thinking: ['PROCESANDO', 'analizando audio'],
+    speaking: ['HABLANDO', 'transmitiendo respuesta'],
+    disconnected: ['RECONECTANDO', 'sin señal de ultron_voice'],
+    paused: ['PAUSADO', 'toca el boton para reanudar'],
+  };
+
+  for (let i = 0; i < 60; i++) {
+    const a = (i / 60) * 360;
+    const long = i % 5 === 0;
+    const r1 = long ? 100 : 106;
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    const rad = (a * Math.PI) / 180;
+    line.setAttribute('x1', 200 + r1 * Math.cos(rad));
+    line.setAttribute('y1', 200 + r1 * Math.sin(rad));
+    line.setAttribute('x2', 200 + 112 * Math.cos(rad));
+    line.setAttribute('y2', 200 + 112 * Math.sin(rad));
+    ticksGroup.appendChild(line);
+  }
+
+  let dpr = Math.max(1, window.devicePixelRatio || 1);
+  function resize() {
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+  }
+  window.addEventListener('resize', resize);
+  requestAnimationFrame(resize);
+
+  const particles = Array.from({ length: 34 }, () => ({
+    angle: Math.random() * Math.PI * 2,
+    speed: (Math.random() * .0022 + .0006) * (Math.random() < .5 ? -1 : 1),
+    radius: 90 + Math.random() * 88,
+    size: Math.random() * 1.6 + .5,
+    phase: Math.random() * Math.PI * 2,
+  }));
+
+  const SPOKES = 56;
+  const spokeSeeds = Array.from({ length: SPOKES }, () => Math.random());
+
+  let state = 'booting';
+  let targetLevel = 0;
+  let displayLevel = 0;
+  let lastLevelAt = 0;
+  let scanAngle = 0;
+
+  function accentColor() {
+    return getComputedStyle(root).getPropertyValue('--accent').trim() || '#7ecbe0';
+  }
+
+  function setState(next) {
+    if (!LABELS[next]) return;
+    state = next;
+    root.setAttribute('data-state', next);
+    const [main, subtitle] = LABELS[next];
+    label.textContent = main;
+    sub.textContent = subtitle;
+    tmState.textContent = main;
+  }
+
+  function tick(payload) {
+    if (payload.state) setState(payload.state);
+    if (typeof payload.level === 'number') {
+      targetLevel = Math.max(0, Math.min(1, payload.level));
+      lastLevelAt = performance.now();
+    }
+    if (state !== 'speaking') targetLevel = 0;
+  }
+
+  function frame(t) {
+    if (state === 'speaking' && performance.now() - lastLevelAt > 220) {
+      targetLevel *= 0.85;
+    }
+    displayLevel += (targetLevel - displayLevel) * 0.22;
+    if (displayLevel < 0.004) displayLevel = 0;
+
+    tmLevel.textContent = String(Math.round(displayLevel * 100)).padStart(2, '0') + '%';
+
+    const glow = state === 'speaking' ? 0.25 + displayLevel * 0.9
+      : state === 'thinking' ? 0.55
+      : state === 'listening' ? 0.32
+      : 0.1;
+    const scale = state === 'speaking' ? 1 + displayLevel * 0.22 : 1;
+    core.style.setProperty('--core-glow', glow.toFixed(3));
+    core.style.setProperty('--core-scale', scale.toFixed(3));
+    core.style.setProperty('--core-opacity', String(state === 'disconnected' ? 0.3 : 0.85 + displayLevel * 0.15));
+
+    drawFx(t);
+    requestAnimationFrame(frame);
+  }
+
+  function drawFx(t) {
+    const w = canvas.width, h = canvas.height;
+    if (!w || !h) { requestAnimationFrame(frame); return; }
+    ctx.clearRect(0, 0, w, h);
+    const cx = w / 2, cy = h / 2;
+    const scale = w / 400;
+    const color = accentColor();
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(scale, scale);
+
+    ctx.shadowBlur = 6;
+    ctx.shadowColor = color;
+    ctx.fillStyle = color;
+    for (const p of particles) {
+      p.angle += p.speed * (state === 'thinking' ? 2.6 : state === 'speaking' ? 1.4 : 1);
+      const wobble = Math.sin(t * 0.0012 + p.phase) * 3;
+      const r = p.radius + wobble;
+      const x = Math.cos(p.angle) * r;
+      const y = Math.sin(p.angle) * r;
+      ctx.globalAlpha = state === 'disconnected' ? 0.15 : 0.55;
+      ctx.beginPath();
+      ctx.arc(x, y, p.size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0;
+
+    if (state === 'thinking') {
+      scanAngle += 0.045;
+      ctx.save();
+      ctx.rotate(scanAngle);
+      const sweep = ctx.createLinearGradient(0, -140, 0, 140);
+      sweep.addColorStop(0, 'transparent');
+      sweep.addColorStop(0.5, hexToRgba(color, 0.28));
+      sweep.addColorStop(1, 'transparent');
+      ctx.fillStyle = sweep;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, 140, -0.32, 0.32);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    if (state === 'speaking') {
+      ctx.shadowBlur = 10;
+      ctx.shadowColor = color;
+      for (let i = 0; i < SPOKES; i++) {
+        const a = (i / SPOKES) * Math.PI * 2;
+        const noise = Math.sin(t * 0.006 + spokeSeeds[i] * 20) * 0.35 + 0.65;
+        const len = 8 + displayLevel * 60 * noise * (0.4 + spokeSeeds[i] * 0.9);
+        const rIn = 96;
+        const x1 = Math.cos(a) * rIn, y1 = Math.sin(a) * rIn;
+        const x2 = Math.cos(a) * (rIn + len), y2 = Math.sin(a) * (rIn + len);
+        ctx.globalAlpha = 0.35 + displayLevel * 0.5;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.6;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      ctx.shadowBlur = 0;
+    }
+
+    ctx.restore();
+  }
+
+  function hexToRgba(oklchStr, alpha) {
+    return `color-mix(in oklch, ${oklchStr} ${Math.round(alpha * 100)}%, transparent)`;
+  }
+
+  requestAnimationFrame(frame);
+
+  const pauseBtn = document.getElementById('pause-btn');
+  pauseBtn.addEventListener('click', () => {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ cmd: 'toggle_pause' }));
+    }
+  });
+
+  let socket = null;
+  let retryDelay = 800;
+
+  function connect() {
+    try {
+      socket = new WebSocket('ws://localhost:8765');
+    } catch (e) {
+      scheduleRetry();
+      return;
+    }
+    socket.onopen = () => {
+      tmLink.textContent = 'OK';
+      retryDelay = 800;
+    };
+    socket.onmessage = (ev) => {
+      try { tick(JSON.parse(ev.data)); } catch (e) {}
+    };
+    socket.onclose = () => {
+      tmLink.textContent = '--';
+      setState('disconnected');
+      scheduleRetry();
+    };
+    socket.onerror = () => {
+      socket.close();
+    };
+  }
+
+  function scheduleRetry() {
+    retryDelay = Math.min(retryDelay * 1.4, 5000);
+    setTimeout(connect, retryDelay);
+  }
+
+  connect();
+})();
+</script>
+</body>
+</html>

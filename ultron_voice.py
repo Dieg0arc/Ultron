@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Jarvis: escucha el microfono en segundo plano esperando "estas ahi jarvis?".
+"""Ultron: escucha el microfono en segundo plano esperando "estas ahi ultron?".
 
 Flujo:
 
-  1. Usuario: "estas ahi jarvis?"
-     Jarvis:  "Claro que si, señor. ¿Comenzamos?"
+  1. Usuario: "estas ahi ultron?"
+     Ultron:  "Claro que si, señor. ¿Comenzamos?"
   2. Usuario responde:
      - "si"  -> arranca el ciclo del dia:
          a. Dice el saludo.
@@ -16,27 +16,36 @@ Flujo:
             - "trabajo"  -> abre el link de Google Meet en Brave.
             - "paginas"  -> abre webture.vercel.app y github.com/Dieg0arc.
             - si no entiende, repite la pregunta una vez; si sigue sin
-              entender, cancela y vuelve a esperar "estas ahi jarvis?".
-     - "no"  -> cancela este arranque y vuelve a esperar "estas ahi jarvis?".
+              entender, cancela y vuelve a esperar "estas ahi ultron?".
+     - "no"  -> cancela este arranque y vuelve a esperar "estas ahi ultron?".
      - no entendido -> repite "¿comenzamos?" una vez; si sigue sin
        entender, cancela.
 
-  En CUALQUIER momento en que Jarvis este escuchando (esperando el saludo,
+  En CUALQUIER momento en que Ultron este escuchando (esperando el saludo,
   confirmando "¿comenzamos?", preguntando por la musica, o esperando
-  "trabajo/paginas"), si el usuario dice "no mas por hoy jarvis", Jarvis
+  "trabajo/paginas"), si el usuario dice "no mas por hoy ultron", Ultron
   responde "okay, señor", CANCELA lo que este preguntando/haciendo en ese
-  momento y vuelve a esperar "estas ahi jarvis?". El microfono NUNCA se
-  apaga por esto -- Jarvis sigue escuchando siempre, solo deja de
+  momento y vuelve a esperar "estas ahi ultron?". El microfono NUNCA se
+  apaga por esto -- Ultron sigue escuchando siempre, solo deja de
   insistir con la pregunta actual.
 
 Arquitectura de audio: un unico InputStream continuo alimenta un buffer
 circular (RingBuffer), del cual se leen ventanas periodicas o de duracion
 fija para transcribir con Whisper. Todo corre en un solo proceso/hilo
 principal, sin abrir el microfono en modo exclusivo mas de una vez.
+
+Arquitectura del HUD: un HudBus levanta un servidor WebSocket local
+(ws://localhost:8765) y transmite el estado actual ("booting", "listening",
+"thinking", "speaking") a quien este conectado. `ultron_hud.py` (proceso
+aparte, ventana pywebview) es el consumidor tipico: se lanza automaticamente
+al arrancar y pinta un HUD que refleja en vivo si Ultron esta escuchando,
+procesando o hablando -- incluyendo la envolvente de amplitud real de cada
+frase para que el nucleo reaccione a la voz, no a una animacion falsa.
 """
 
 import asyncio
 import difflib
+import json
 import os
 import random
 import re
@@ -52,6 +61,11 @@ import miniaudio
 import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
+
+try:
+    import websockets
+except ImportError:  # pragma: no cover - el HUD es opcional
+    websockets = None
 
 # --- Voz / frases -----------------------------------------------------
 VOICE = "es-ES-AlvaroNeural"
@@ -103,13 +117,119 @@ CHOICE_PEAK_FLOOR = 0.015   # bajo este pico, se asume silencio total
 
 WHISPER_MODEL_SIZE = "small"
 LANGUAGE = "es"
-STT_PROMPT = "¿Estás ahí, Jarvis? Sí. No. No más por hoy, Jarvis. Trabajo o páginas."
+STT_PROMPT = "¿Estás ahí, Ultron? Sí. No. No más por hoy, Ultron. Trabajo o páginas."
 
-LOG_PREFIX = "[jarvis]"
+LOG_PREFIX = "[ultron]"
 
 
 def log(msg: str) -> None:
     print(f"{LOG_PREFIX} {msg}", flush=True)
+
+
+# --- HUD (WebSocket) ----------------------------------------------------------
+HUD_WS_HOST = "localhost"
+HUD_WS_PORT = 8765
+HUD_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ultron_hud.py")
+
+
+class HudBus:
+    """Servidor WebSocket local que transmite el estado de Ultron al HUD.
+
+    Corre en su propio hilo/loop de asyncio para no interferir con el hilo
+    principal (que hace I/O de audio bloqueante). Si `websockets` no esta
+    instalado o el HUD no esta corriendo, `broadcast` simplemente no tiene
+    a quien mandarle nada y Ultron sigue funcionando igual sin HUD.
+    """
+
+    def __init__(self, host: str = HUD_WS_HOST, port: int = HUD_WS_PORT):
+        self.host = host
+        self.port = port
+        self._clients = set()
+        self._loop = None
+        self._last_payload = {"state": "booting", "ts": time.time()}
+        self._ready = threading.Event()
+        self.paused = threading.Event()
+
+    def start(self) -> None:
+        if websockets is None:
+            log("Modulo 'websockets' no instalado: el HUD no recibira estado.")
+            return
+        threading.Thread(target=self._run, daemon=True).start()
+        self._ready.wait(timeout=5)
+
+    def _run(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_until_complete(self._serve())
+        except Exception as exc:
+            log(f"Error en servidor del HUD: {exc!r}")
+
+    async def _serve(self) -> None:
+        async def handler(ws, *_args):
+            self._clients.add(ws)
+            try:
+                await ws.send(json.dumps(self._last_payload))
+                async for raw in ws:
+                    self._handle_message(raw)
+            except Exception:
+                pass
+            finally:
+                self._clients.discard(ws)
+
+        async with websockets.serve(handler, self.host, self.port):
+            self._ready.set()
+            await asyncio.Future()  # correr para siempre
+
+    def _handle_message(self, raw) -> None:
+        try:
+            msg = json.loads(raw)
+        except Exception:
+            return
+        if msg.get("cmd") != "toggle_pause":
+            return
+        if self.paused.is_set():
+            self.paused.clear()
+            log("Reanudado desde el HUD.")
+            self.set_state("listening")
+        else:
+            self.paused.set()
+            log("Pausado desde el HUD.")
+            self.set_state("paused")
+
+    def set_state(self, state: str, **extra) -> None:
+        payload = {"state": state, "ts": time.time(), **extra}
+        self._last_payload = payload
+        if self._loop is None:
+            return
+        asyncio.run_coroutine_threadsafe(self._broadcast(payload), self._loop)
+
+    async def _broadcast(self, payload: dict) -> None:
+        if not self._clients:
+            return
+        data = json.dumps(payload)
+        dead = []
+        for ws in list(self._clients):
+            try:
+                await ws.send(data)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self._clients.discard(ws)
+
+
+hud = HudBus()
+
+
+def launch_hud() -> subprocess.Popen | None:
+    """Lanza `ultron_hud.py` (ventana pywebview) como proceso aparte."""
+    if not os.path.exists(HUD_SCRIPT):
+        return None
+    try:
+        return subprocess.Popen([sys.executable, HUD_SCRIPT])
+    except Exception as exc:
+        log(f"No se pudo lanzar el HUD: {exc!r}")
+        return None
 
 
 # --- Buffer circular de audio ------------------------------------------------
@@ -167,20 +287,20 @@ def any_word_close(words, target: str, threshold: float = 0.65) -> bool:
 
 
 def has_presence_wake(norm_text: str) -> bool:
-    """'estas ahi jarvis?'"""
+    """'estas ahi ultron?'"""
     words = norm_text.split()
     has_query = "estas" in words or "ahi" in words
-    has_jarvis = "jarvis" in words or any_word_close(words, "jarvis")
-    return has_query and has_jarvis
+    has_ultron = "ultron" in words or any_word_close(words, "ultron")
+    return has_query and has_ultron
 
 
 def has_shutdown_phrase(norm_text: str) -> bool:
-    """'no mas por hoy jarvis'"""
+    """'no mas por hoy ultron'"""
     words = norm_text.split()
     has_no = "no" in words
     has_mas = "mas" in words
-    has_jarvis = "jarvis" in words or any_word_close(words, "jarvis")
-    return has_no and has_mas and has_jarvis
+    has_ultron = "ultron" in words or any_word_close(words, "ultron")
+    return has_no and has_mas and has_ultron
 
 
 def parse_yes_no(norm_text: str):
@@ -255,16 +375,64 @@ def play_mp3(path: str) -> None:
     device.stop()
 
 
+VOICE_ENVELOPE_CHUNK_MS = 60
+
+
+def voice_envelope(path: str, chunk_ms: int = VOICE_ENVELOPE_CHUNK_MS):
+    """Decodifica el mp3 y devuelve una envolvente de amplitud (0..1) por
+    ventanas de `chunk_ms`, para que el HUD reaccione a la voz real en vez
+    de una animacion inventada."""
+    decoded = miniaudio.decode_file(path, output_format=miniaudio.SampleFormat.FLOAT32)
+    samples = np.array(decoded.samples, dtype="float32")
+    if decoded.nchannels > 1:
+        samples = samples.reshape(-1, decoded.nchannels).mean(axis=1)
+
+    chunk = max(1, int(decoded.sample_rate * chunk_ms / 1000))
+    levels = []
+    for i in range(0, len(samples), chunk):
+        seg = samples[i : i + chunk]
+        if len(seg) == 0:
+            continue
+        levels.append(float(np.sqrt(np.mean(np.square(seg)))))
+
+    if levels:
+        peak = max(levels) or 1.0
+        # curva perceptual: comprime los picos, realza los niveles bajos
+        levels = [min(1.0, (lvl / peak) ** 0.6) for lvl in levels]
+    return levels
+
+
+def broadcast_voice_envelope(levels, chunk_ms: int = VOICE_ENVELOPE_CHUNK_MS) -> None:
+    interval = chunk_ms / 1000.0
+    for level in levels:
+        hud.set_state("speaking", level=round(level, 3))
+        time.sleep(interval)
+
+
 def say(text: str) -> None:
     mp3_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
             mp3_path = tmp.name
         synthesize(text, VOICE, mp3_path)
+
+        levels = []
+        try:
+            levels = voice_envelope(mp3_path)
+        except Exception as exc:
+            log(f"No se pudo calcular la envolvente de voz: {exc!r}")
+
+        hud.set_state("speaking", text=text, level=0.0)
+        if levels:
+            threading.Thread(
+                target=broadcast_voice_envelope, args=(levels,), daemon=True
+            ).start()
+
         play_mp3(mp3_path)
     except Exception as exc:
         log(f"Error generando/reproduciendo voz: {exc!r}")
     finally:
+        hud.set_state("listening")
         if mp3_path:
             try:
                 os.remove(mp3_path)
@@ -284,10 +452,15 @@ def transcribe(model: WhisperModel, audio: np.ndarray, vad_filter: bool = True) 
     return " ".join(seg.text for seg in segments).strip()
 
 
-# --- Espera de "estas ahi jarvis?" / "no mas por hoy jarvis" ---------------
+# --- Espera de "estas ahi ultron?" / "no mas por hoy ultron" ---------------
 def wait_for_presence_or_shutdown(model: WhisperModel, ring: RingBuffer) -> str:
-    log("Esperando 'estas ahi jarvis?'...")
+    log("Esperando 'estas ahi ultron?'...")
     while True:
+        if hud.paused.is_set():
+            hud.set_state("paused")
+            time.sleep(WAKE_POLL_INTERVAL)
+            continue
+
         audio = ring.read_last(int(WAKE_WINDOW_SECONDS * SAMPLE_RATE))
         if len(audio) == 0:
             time.sleep(WAKE_POLL_INTERVAL)
@@ -297,7 +470,9 @@ def wait_for_presence_or_shutdown(model: WhisperModel, ring: RingBuffer) -> str:
             time.sleep(WAKE_POLL_INTERVAL)
             continue
 
+        hud.set_state("thinking")
         text = transcribe(model, audio)
+        hud.set_state("listening")
         if text:
             log(f"oido: {text!r}")
             norm = normalize(text)
@@ -322,7 +497,9 @@ def listen_confirm_once(model: WhisperModel, ring: RingBuffer):
         log("No se detecto voz (silencio).")
         return None
 
+    hud.set_state("thinking")
     text = transcribe(model, audio, vad_filter=False)
+    hud.set_state("listening")
     norm = normalize(text)
     log(f"oido confirmacion: {text!r}")
 
@@ -355,7 +532,9 @@ def listen_music_confirm_once(model: WhisperModel, ring: RingBuffer):
         log("No se detecto voz (silencio).")
         return None
 
+    hud.set_state("thinking")
     text = transcribe(model, audio, vad_filter=False)
+    hud.set_state("listening")
     norm = normalize(text)
     log(f"oido musica: {text!r}")
 
@@ -397,7 +576,9 @@ def ask_choice_once(model: WhisperModel, ring: RingBuffer):
         log("No se detecto voz (silencio). No transcribo para evitar alucinaciones.")
         return None
 
+    hud.set_state("thinking")
     text = transcribe(model, audio, vad_filter=False)
+    hud.set_state("listening")
     norm = normalize(text)
     log(f"oido respuesta: {text!r}")
 
@@ -444,6 +625,10 @@ def handle_choice(model: WhisperModel, ring: RingBuffer):
 
 # --- Main ------------------------------------------------------------------
 def main() -> None:
+    hud.start()
+    hud_process = launch_hud()
+
+    hud.set_state("booting")
     log(f"Cargando modelo Whisper ({WHISPER_MODEL_SIZE})...")
     model = WhisperModel(WHISPER_MODEL_SIZE, device="cpu", compute_type="int8")
     log("Modelo listo.")
@@ -464,14 +649,15 @@ def main() -> None:
         callback=audio_callback,
     )
     stream.start()
-    log("Jarvis activo. Di 'estas ahi jarvis?' para comenzar.")
+    hud.set_state("listening")
+    log("Ultron activo. Di 'estas ahi ultron?' para comenzar.")
 
     try:
         while True:
             trigger = wait_for_presence_or_shutdown(model, ring)
             if trigger == "cancelar":
                 say(CANCEL_ACK)
-                log("'No mas por hoy jarvis' detectado en espera. Sigo escuchando 'estas ahi jarvis?'.")
+                log("'No mas por hoy ultron' detectado en espera. Sigo escuchando 'estas ahi ultron?'.")
                 continue
 
             log("Presencia detectada.")
@@ -480,7 +666,7 @@ def main() -> None:
 
             if answer == "cancelar":
                 say(CANCEL_ACK)
-                log("'No mas por hoy jarvis' detectado en confirmacion. Cancelo y sigo escuchando.")
+                log("'No mas por hoy ultron' detectado en confirmacion. Cancelo y sigo escuchando.")
             elif answer == "si":
                 say(random_greeting())
                 time.sleep(PRE_LISTEN_DELAY)
@@ -490,7 +676,7 @@ def main() -> None:
 
                 if music_answer == "cancelar":
                     say(CANCEL_ACK)
-                    log("'No mas por hoy jarvis' detectado al preguntar musica. Cancelo y sigo escuchando.")
+                    log("'No mas por hoy ultron' detectado al preguntar musica. Cancelo y sigo escuchando.")
                     continue
 
                 if music_answer == "si":
@@ -505,14 +691,16 @@ def main() -> None:
                 result = handle_choice(model, ring)
                 if result == "cancelar":
                     say(CANCEL_ACK)
-                    log("'No mas por hoy jarvis' detectado durante el ciclo. Cancelo y sigo escuchando.")
+                    log("'No mas por hoy ultron' detectado durante el ciclo. Cancelo y sigo escuchando.")
             elif answer == "no":
-                log("Usuario dijo que no. Vuelvo a esperar 'estas ahi jarvis?'.")
+                log("Usuario dijo que no. Vuelvo a esperar 'estas ahi ultron?'.")
             else:
-                log("No entendi si comenzamos. Vuelvo a esperar 'estas ahi jarvis?'.")
+                log("No entendi si comenzamos. Vuelvo a esperar 'estas ahi ultron?'.")
     finally:
         stream.stop()
         stream.close()
+        if hud_process is not None:
+            hud_process.terminate()
 
 
 if __name__ == "__main__":
